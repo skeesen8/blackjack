@@ -1,13 +1,14 @@
 import axios, { AxiosInstance, AxiosResponse } from 'axios';
 import {
-  AuthResponse,
-  TableListResponse,
-  TableResponse,
-  PlayerResponse,
+  User,
+  Table,
   ApiResponse,
-  GameTable,
-  PlayerAction
-} from '../types/game';
+  AuthResponse,
+  LoginRequest,
+  RegisterRequest,
+  CreateTableRequest,
+  TablesResponse
+} from '../types';
 
 class ApiService {
   private api: AxiosInstance;
@@ -52,20 +53,13 @@ class ApiService {
   }
 
   // Auth endpoints
-  async register(username: string, password: string, email?: string): Promise<AuthResponse> {
-    const response: AxiosResponse<AuthResponse> = await this.api.post('/api/auth/register', {
-      username,
-      password,
-      email,
-    });
+  async register(data: RegisterRequest): Promise<AuthResponse> {
+    const response: AxiosResponse<AuthResponse> = await this.api.post('/api/auth/register', data);
     return response.data;
   }
 
-  async login(username: string, password: string): Promise<AuthResponse> {
-    const response: AxiosResponse<AuthResponse> = await this.api.post('/api/auth/login', {
-      username,
-      password,
-    });
+  async login(data: LoginRequest): Promise<AuthResponse> {
+    const response: AxiosResponse<AuthResponse> = await this.api.post('/api/auth/login', data);
     return response.data;
   }
 
@@ -74,142 +68,51 @@ class ApiService {
     return response.data;
   }
 
-  async getCurrentUser(): Promise<ApiResponse> {
-    const response: AxiosResponse<ApiResponse> = await this.api.get('/api/auth/me');
-    return response.data;
-  }
-
-  async refreshToken(): Promise<AuthResponse> {
-    const response: AxiosResponse<AuthResponse> = await this.api.post('/api/auth/refresh');
+  async getCurrentUser(): Promise<ApiResponse<User>> {
+    const response: AxiosResponse<ApiResponse<User>> = await this.api.get('/api/auth/me');
     return response.data;
   }
 
   // Table endpoints
-  async getAllTables(): Promise<TableListResponse> {
-    const response: AxiosResponse<TableListResponse> = await this.api.get('/api/tables');
+  async getTables(): Promise<TablesResponse> {
+    const response: AxiosResponse<TablesResponse> = await this.api.get('/api/tables');
     return response.data;
   }
 
-  async getAvailableTables(): Promise<TableListResponse> {
-    const response: AxiosResponse<TableListResponse> = await this.api.get('/api/tables/available');
+  async getTable(tableId: string): Promise<ApiResponse<Table>> {
+    const response: AxiosResponse<ApiResponse<Table>> = await this.api.get(`/api/tables/${tableId}`);
     return response.data;
   }
 
-  async getActiveTables(): Promise<TableListResponse> {
-    const response: AxiosResponse<TableListResponse> = await this.api.get('/api/tables/active');
+  async createTable(data: CreateTableRequest): Promise<ApiResponse<Table>> {
+    const response: AxiosResponse<ApiResponse<Table>> = await this.api.post('/api/tables', data);
     return response.data;
   }
 
-  async getTable(tableId: string): Promise<TableResponse> {
-    const response: AxiosResponse<TableResponse> = await this.api.get(`/api/tables/${tableId}`);
+  async joinTable(tableId: string): Promise<ApiResponse<any>> {
+    const response: AxiosResponse<ApiResponse<any>> = await this.api.post(`/api/tables/${tableId}/join`);
     return response.data;
   }
 
-  async getTableState(tableId: string, playerId?: string): Promise<TableResponse> {
-    const params = playerId ? { player_id: playerId } : {};
-    const response: AxiosResponse<TableResponse> = await this.api.get(
-      `/api/tables/${tableId}/state`,
-      { params }
-    );
-    return response.data;
-  }
-
-  async spectateTable(tableId: string): Promise<ApiResponse> {
-    const response: AxiosResponse<ApiResponse> = await this.api.get(`/api/tables/${tableId}/spectate`);
-    return response.data;
-  }
-
-  async getTableStats(): Promise<ApiResponse> {
-    const response: AxiosResponse<ApiResponse> = await this.api.get('/api/tables/stats');
-    return response.data;
-  }
-
-  // Game endpoints
-  async createTable(name: string, minBet: number = 10, maxBet: number = 500): Promise<TableResponse> {
-    const response: AxiosResponse<TableResponse> = await this.api.post('/api/game/tables', {
-      name,
-      min_bet: minBet,
-      max_bet: maxBet,
-    });
-    return response.data;
-  }
-
-  async joinTable(tableId: string, playerName: string): Promise<PlayerResponse> {
-    const response: AxiosResponse<PlayerResponse> = await this.api.post(
-      `/api/game/tables/${tableId}/join`,
-      { player_name: playerName }
-    );
-    return response.data;
-  }
-
-  async leaveTable(tableId: string, playerId: string): Promise<ApiResponse> {
-    const response: AxiosResponse<ApiResponse> = await this.api.post(
-      `/api/game/tables/${tableId}/leave`,
-      null,
-      { params: { player_id: playerId } }
-    );
-    return response.data;
-  }
-
-  async placeBet(tableId: string, playerId: string, amount: number): Promise<ApiResponse> {
-    const response: AxiosResponse<ApiResponse> = await this.api.post(
-      `/api/game/tables/${tableId}/bet`,
-      { player_id: playerId, amount }
-    );
-    return response.data;
-  }
-
-  async startGame(tableId: string): Promise<ApiResponse> {
-    const response: AxiosResponse<ApiResponse> = await this.api.post(
-      `/api/game/tables/${tableId}/start`
-    );
-    return response.data;
-  }
-
-  async playerAction(
-    tableId: string,
-    playerId: string,
-    action: PlayerAction,
-    handIndex: number = 0
-  ): Promise<ApiResponse> {
-    const response: AxiosResponse<ApiResponse> = await this.api.post(
-      `/api/game/tables/${tableId}/action`,
-      {
-        player_id: playerId,
-        action,
-        hand_index: handIndex,
-      }
-    );
-    return response.data;
-  }
-
-  async resetTable(tableId: string): Promise<ApiResponse> {
-    const response: AxiosResponse<ApiResponse> = await this.api.post(
-      `/api/game/tables/${tableId}/reset`
-    );
+  async leaveTable(tableId: string): Promise<ApiResponse<any>> {
+    const response: AxiosResponse<ApiResponse<any>> = await this.api.post(`/api/tables/${tableId}/leave`);
     return response.data;
   }
 
   // Health check
-  async healthCheck(): Promise<ApiResponse> {
-    const response: AxiosResponse<ApiResponse> = await this.api.get('/health');
+  async healthCheck(): Promise<ApiResponse<any>> {
+    const response: AxiosResponse<ApiResponse<any>> = await this.api.get('/health');
     return response.data;
   }
 
   // WebSocket URL
   getWebSocketUrl(tableId: string): string {
-    const wsProtocol = this.baseURL.startsWith('https') ? 'wss' : 'ws';
-    const wsBaseUrl = this.baseURL.replace(/^https?/, wsProtocol);
-    return `${wsBaseUrl}/ws/${tableId}`;
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsHost = this.baseURL.replace(/^https?:\/\//, '');
+    return `${wsProtocol}//${wsHost}/ws/table/${tableId}`;
   }
 
-  getChatWebSocketUrl(tableId: string): string {
-    const wsProtocol = this.baseURL.startsWith('https') ? 'wss' : 'ws';
-    const wsBaseUrl = this.baseURL.replace(/^https?/, wsProtocol);
-    return `${wsBaseUrl}/ws/chat/${tableId}`;
-  }
-
-  // Utility methods
+  // Auth helpers
   setAuthToken(token: string): void {
     localStorage.setItem('access_token', token);
   }
@@ -228,5 +131,16 @@ class ApiService {
   }
 }
 
+// Create singleton instance
 export const apiService = new ApiService();
+
+// Create table service for easier imports
+export const tableService = {
+  getTables: () => apiService.getTables(),
+  getTable: (id: string) => apiService.getTable(id),
+  createTable: (data: CreateTableRequest) => apiService.createTable(data),
+  joinTable: (id: string) => apiService.joinTable(id),
+  leaveTable: (id: string) => apiService.leaveTable(id),
+};
+
 export default apiService; 
