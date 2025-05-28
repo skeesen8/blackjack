@@ -1,0 +1,129 @@
+version: '3.8'
+
+services:
+  # Backend FastAPI service
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: production
+    container_name: blackjack-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONPATH=/app
+      - SECRET_KEY=dev-secret-key-change-in-production
+      - DATABASE_URL=sqlite:///./blackjack.db
+      - REDIS_URL=redis://redis:6379
+      - AWS_REGION=us-east-1
+    volumes:
+      - ./backend:/app
+      - backend_data:/app/data
+    depends_on:
+      - redis
+    networks:
+      - blackjack-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Frontend React service
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: development
+    container_name: blackjack-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - REACT_APP_API_URL=http://localhost:8000
+      - REACT_APP_WS_URL=ws://localhost:8000
+      - CHOKIDAR_USEPOLLING=true
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    depends_on:
+      - backend
+    networks:
+      - blackjack-network
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+
+  # Redis for session management and caching
+  redis:
+    image: redis:7-alpine
+    container_name: blackjack-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - blackjack-network
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Nginx reverse proxy (optional for production-like setup)
+  nginx:
+    image: nginx:alpine
+    container_name: blackjack-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - frontend
+      - backend
+    networks:
+      - blackjack-network
+    restart: unless-stopped
+    profiles:
+      - production
+
+volumes:
+  backend_data:
+    driver: local
+  redis_data:
+    driver: local
+
+networks:
+  blackjack-network:
+    driver: bridge
+
+# Development override
+# Use: docker-compose -f docker-compose.yml -f docker-compose.dev.yml up
+---
+version: '3.8'
+
+# Development-specific overrides
+services:
+  backend:
+    build:
+      target: production
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    environment:
+      - DEBUG=true
+      - LOG_LEVEL=debug
+    volumes:
+      - ./backend:/app
+
+  frontend:
+    build:
+      target: development
+    command: npm start
+    environment:
+      - NODE_ENV=development
+      - REACT_APP_API_URL=http://localhost:8000
+      - REACT_APP_WS_URL=ws://localhost:8000 
