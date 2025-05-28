@@ -14,6 +14,7 @@ class CreateTableRequest(BaseModel):
 
 class JoinTableRequest(BaseModel):
     player_name: str
+    player_id: Optional[str] = None
 
 class PlaceBetRequest(BaseModel):
     player_id: str
@@ -69,7 +70,7 @@ async def get_table(table_id: str):
 @router.post("/tables/{table_id}/join", response_model=dict)
 async def join_table(table_id: str, request: JoinTableRequest):
     """Join a table"""
-    success, message, player = game_engine.join_table(table_id, request.player_name)
+    success, message, player = game_engine.join_table(table_id, request.player_name, request.player_id)
     
     if not success:
         raise HTTPException(status_code=400, detail=message)

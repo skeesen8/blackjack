@@ -22,23 +22,35 @@ class BlackjackEngine:
         random.shuffle(deck)
         return deck
     
-    def create_table(self, name: str, min_bet: int = 10, max_bet: int = 500) -> GameTable:
+    def create_table(self, name: str, min_bet: int = 10, max_bet: int = 500, max_players: int = 6) -> GameTable:
         """Create a new game table"""
         table = GameTable(
             name=name,
             min_bet=min_bet,
             max_bet=max_bet,
+            max_players=max_players,
             deck=self.create_deck()
         )
         self.tables[table.id] = table
         return table
     
-    def join_table(self, table_id: str, player_name: str) -> Tuple[bool, str, Optional[Player]]:
+    def join_table(self, table_id: str, player_name: str, player_id: str = None) -> Tuple[bool, str, Optional[Player]]:
         """Add a player to a table"""
         if table_id not in self.tables:
             return False, "Table not found", None
         
         table = self.tables[table_id]
+        
+        # Check if player with same name already exists
+        existing_player = next((p for p in table.players if p.name == player_name), None)
+        if existing_player:
+            return True, "Player already at table", existing_player
+        
+        # Also check by player_id if provided
+        if player_id:
+            existing_player_by_id = next((p for p in table.players if p.id == player_id), None)
+            if existing_player_by_id:
+                return True, "Player already at table", existing_player_by_id
         
         if table.is_full:
             return False, "Table is full", None
@@ -51,6 +63,10 @@ class BlackjackEngine:
             name=player_name,
             seat_position=available_seat
         )
+        
+        # Use provided player_id if available
+        if player_id:
+            player.id = player_id
         
         table.players.append(player)
         return True, "Joined successfully", player
@@ -93,7 +109,38 @@ class BlackjackEngine:
         player.current_hand_index = 0
         player.chips -= amount
         
+        # Check if all players have placed bets and auto-start game
+        all_players_bet = all(
+            len(p.hands) > 0 and p.hands[0].bet > 0 
+            for p in table.players if p.is_active
+        )
+        
+        if all_players_bet and len(table.active_players) > 0:
+            # Auto-start the game
+            self._auto_start_game(table)
+        
         return True, "Bet placed successfully"
+    
+    def _auto_start_game(self, table: GameTable):
+        """Automatically start the game when all players have bet"""
+        if table.state != GameState.WAITING:
+            return
+        
+        # Reset deck if running low
+        if len(table.deck) < 20:
+            table.deck = self.create_deck()
+        
+        # Reset dealer
+        table.dealer = Dealer()
+        
+        # Deal initial cards
+        self._deal_initial_cards(table)
+        
+        table.state = GameState.PLAYING
+        table.current_player_index = 0
+        
+        # Check for immediate blackjacks
+        self._check_initial_blackjacks(table)
     
     def start_game(self, table_id: str) -> Tuple[bool, str]:
         """Start a new game round"""
@@ -145,6 +192,35 @@ class BlackjackEngine:
         dealer_card = table.deck.pop()
         dealer_card.hidden = True
         table.dealer.hand.cards.append(dealer_card)
+    
+    def _check_initial_blackjacks(self, table: GameTable):
+        """Check for blackjacks after initial deal"""
+        dealer_has_blackjack = table.dealer.hand.is_blackjack
+        
+        # Check for player blackjacks but don't finish the game yet
+        for player in table.active_players:
+            hand = player.hands[0]
+            if hand.is_blackjack:
+                hand.is_finished = True
+                # Don't pay out yet - wait for dealer to play
+        
+        # If dealer shows an Ace or 10-value card, check for blackjack later
+        # For now, just set up the first player to act
+        table.current_player_index = 0
+        
+        # Find first player who needs to act (skip blackjacks)
+        self._find_next_active_player_initial(table)
+    
+    def _find_next_active_player_initial(self, table: GameTable):
+        """Find the first player who needs to act (for initial setup)"""
+        for i, player in enumerate(table.active_players):
+            hand = player.current_hand
+            if hand and not hand.is_finished:
+                table.current_player_index = i
+                return
+        
+        # If all players have blackjack or are finished, go to dealer
+        self._dealer_turn(table)
     
     def player_action(self, table_id: str, player_id: str, action: PlayerAction, 
                      hand_index: int = 0) -> Tuple[bool, str, Dict[str, Any]]:
@@ -305,15 +381,43 @@ class BlackjackEngine:
     
     def _next_hand_or_player(self, table: GameTable, player: Player):
         """Move to next hand or next player"""
-        # Check if player has more hands
-        if player.current_hand_index + 1 < len(player.hands):
-            player.current_hand_index += 1
-        else:
-            # Move to next player
+        # Use the centralized logic for finding next active player
+        self._find_next_active_player(table)
+    
+    def _find_next_active_player(self, table: GameTable):
+        """Find the next player who needs to act"""
+        current_player = table.active_players[table.current_player_index]
+        
+        # Check if current player has more hands to play
+        if current_player.current_hand_index + 1 < len(current_player.hands):
+            current_player.current_hand_index += 1
+            current_hand = current_player.current_hand
+            if current_hand and not current_hand.is_finished:
+                return  # Stay with same player, next hand
+        
+        # Move to next player
+        starting_index = table.current_player_index
+        
+        while True:
             table.current_player_index += 1
-            if table.current_player_index < len(table.active_players):
-                next_player = table.active_players[table.current_player_index]
-                next_player.current_hand_index = 0
+            
+            # If we've gone through all players, move to dealer turn
+            if table.current_player_index >= len(table.active_players):
+                self._dealer_turn(table)
+                return
+            
+            current_player = table.active_players[table.current_player_index]
+            current_player.current_hand_index = 0  # Reset to first hand
+            current_hand = current_player.current_hand
+            
+            # If this player has an unfinished hand, they're the active player
+            if current_hand and not current_hand.is_finished:
+                return
+            
+            # If we've looped back to where we started, all players are done
+            if table.current_player_index == starting_index:
+                self._dealer_turn(table)
+                return
     
     def _all_players_done(self, table: GameTable) -> bool:
         """Check if all players have finished their turns"""
@@ -327,14 +431,26 @@ class BlackjackEngine:
         """Play dealer's turn"""
         table.state = GameState.DEALER_TURN
         
-        # Reveal hidden card
+        # Reveal hidden card (hole card)
         if len(table.dealer.hand.cards) > 1:
             table.dealer.hand.cards[1].hidden = False
         
-        # Dealer hits until 17 or higher
-        while table.dealer.should_hit:
-            card = table.deck.pop()
-            table.dealer.hand.cards.append(card)
+        # Check if all players busted - if so, dealer doesn't need to play
+        all_players_busted = all(
+            all(hand.is_bust for hand in player.hands) 
+            for player in table.active_players
+        )
+        
+        if not all_players_busted:
+            # Dealer hits until 17 or higher (including soft 17)
+            while table.dealer.should_hit:
+                if len(table.deck) == 0:
+                    table.deck = self.create_deck()
+                card = table.deck.pop()
+                table.dealer.hand.cards.append(card)
+        
+        # Calculate final results
+        self._calculate_results(table)
     
     def _calculate_results(self, table: GameTable) -> List[GameResult]:
         """Calculate game results and update player chips"""
@@ -351,26 +467,34 @@ class BlackjackEngine:
                 winnings = 0
                 
                 if hand.is_surrendered:
-                    # Already handled in surrender
+                    # Already handled in surrender - player gets half bet back
                     result = "surrendered"
+                    winnings = hand.bet // 2  # Half bet returned
                 elif hand.is_bust:
                     result = "bust"
+                    winnings = 0  # Lose entire bet
                 elif hand.is_blackjack and not dealer_blackjack:
                     # Blackjack pays 3:2
-                    winnings = int(hand.bet * 2.5)
+                    winnings = hand.bet + int(hand.bet * 1.5)  # Original bet + 1.5x
                     result = "blackjack"
+                elif hand.is_blackjack and dealer_blackjack:
+                    # Push - return original bet
+                    winnings = hand.bet
+                    result = "push"
                 elif dealer_bust and not hand.is_bust:
-                    winnings = hand.bet * 2
+                    winnings = hand.bet * 2  # Original bet + winnings
                     result = "win"
                 elif hand.value > dealer_value:
-                    winnings = hand.bet * 2
+                    winnings = hand.bet * 2  # Original bet + winnings
                     result = "win"
                 elif hand.value == dealer_value:
-                    winnings = hand.bet  # Push
+                    winnings = hand.bet  # Push - return original bet
                     result = "push"
                 else:
                     result = "lose"
+                    winnings = 0  # Lose entire bet
                 
+                # Update player chips
                 player.chips += winnings
                 total_winnings += winnings
                 
@@ -388,6 +512,9 @@ class BlackjackEngine:
                 winnings=total_winnings,
                 total_bet=player.total_bet
             ))
+        
+        # Set game state to finished
+        table.state = GameState.FINISHED
         
         return results
     
@@ -419,6 +546,35 @@ class BlackjackEngine:
         table.current_player_index = 0
         
         return True
+    
+    def new_round(self, table_id: str) -> Tuple[bool, str]:
+        """Start a new round - reset hands but keep players and chips"""
+        if table_id not in self.tables:
+            return False, "Table not found"
+        
+        table = self.tables[table_id]
+        
+        # Only allow new round if current game is finished
+        if table.state != GameState.FINISHED:
+            return False, "Current game is not finished"
+        
+        # Reset all players' hands but keep their chips
+        for player in table.players:
+            player.hands = []
+            player.current_hand_index = 0
+        
+        # Reset dealer
+        table.dealer = Dealer()
+        
+        # Reset game state to waiting for bets
+        table.state = GameState.WAITING
+        table.current_player_index = 0
+        
+        # Refresh deck if needed
+        if len(table.deck) < 20:
+            table.deck = self.create_deck()
+        
+        return True, "New round started - place your bets!"
 
 # Global game engine instance
 game_engine = BlackjackEngine() 

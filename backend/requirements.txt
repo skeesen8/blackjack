@@ -1,10 +1,11 @@
 fastapi==0.115.6
 uvicorn[standard]==0.32.1
+fastapi[standard]
 websockets==14.1
 pydantic==2.10.5
 pydantic-settings==2.9.1
 python-multipart==0.0.20
-python-jose[cryptography]==3.3.0
+PyJWT==2.10.1
 passlib[bcrypt]==1.7.4
 boto3==1.35.91
 mangum==0.19.0

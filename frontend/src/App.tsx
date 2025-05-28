@@ -9,8 +9,8 @@ import Navbar from './components/Navbar';
 import Home from './pages/Home';
 import Login from './pages/Login';
 import Register from './pages/Register';
-import TableList from './pages/TableList';
-import GameTable from './pages/GameTable';
+import Tables from './pages/Tables';
+import Game from './pages/Game';
 import Profile from './pages/Profile';
 import ProtectedRoute from './components/ProtectedRoute';
 
@@ -119,15 +119,15 @@ function App() {
                 path="/tables" 
                 element={
                   <ProtectedRoute>
-                    <TableList />
+                    <Tables />
                   </ProtectedRoute>
                 } 
               />
               <Route 
-                path="/table/:tableId" 
+                path="/game/:tableId" 
                 element={
                   <ProtectedRoute>
-                    <GameTable />
+                    <Game />
                   </ProtectedRoute>
                 } 
               />

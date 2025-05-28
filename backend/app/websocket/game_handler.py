@@ -2,6 +2,7 @@ from fastapi import WebSocket
 from typing import Dict, Any
 import json
 from datetime import datetime
+import asyncio
 
 from app.websocket.connection_manager import ConnectionManager
 from app.core.game_engine import game_engine
@@ -31,12 +32,17 @@ class GameHandler:
             await self._handle_get_table_state(table_id, websocket, message)
         elif message_type == "reset_table":
             await self._handle_reset_table(table_id, websocket, message)
+        elif message_type == "new_round":
+            await self._handle_new_round(table_id, websocket, message)
+        elif message_type == "chat_message":
+            await self._handle_chat_message(table_id, websocket, message)
         else:
             await self._send_error(websocket, f"Unknown message type: {message_type}")
     
     async def _handle_join_table(self, table_id: str, websocket: WebSocket, message: Dict[str, Any]):
         """Handle player joining table"""
         player_name = message.get("player_name")
+        player_id = message.get("player_id")
         
         if not player_name:
             await self._send_error(websocket, "Player name is required")
@@ -47,8 +53,8 @@ class GameHandler:
         if not table:
             table = game_engine.create_table(f"Table {table_id}")
         
-        # Join table
-        success, msg, player = game_engine.join_table(table_id, player_name)
+        # Join table with player_id if provided
+        success, msg, player = game_engine.join_table(table_id, player_name, player_id)
         
         if success:
             # Update connection manager with player ID
@@ -63,12 +69,20 @@ class GameHandler:
                 "message": msg
             }))
             
-            # Broadcast to all players at table
-            await self.connection_manager.broadcast_to_table(table_id, {
-                "type": "player_joined",
-                "player": player.dict(),
-                "table_state": self._get_table_state_dict(table)
-            })
+            # Only broadcast if this is a new player (not already at table)
+            if "already at table" not in msg.lower():
+                # Broadcast to all players at table
+                await self.connection_manager.broadcast_to_table(table_id, {
+                    "type": "player_joined",
+                    "player": player.dict(),
+                    "table_state": self._get_table_state_dict(table)
+                })
+            else:
+                # Just send current table state to the reconnecting player
+                await websocket.send_text(json.dumps({
+                    "type": "table_state",
+                    "table_state": self._get_table_state_dict(table)
+                }))
         else:
             await self._send_error(websocket, msg)
     
@@ -110,6 +124,10 @@ class GameHandler:
             await self._send_error(websocket, "Player ID and amount are required")
             return
         
+        # Get table state before bet
+        table_before = game_engine.get_table(table_id)
+        was_waiting = table_before.state == "waiting" if table_before else False
+        
         success, msg = game_engine.place_bet(table_id, player_id, amount)
         
         if success:
@@ -130,6 +148,22 @@ class GameHandler:
                 "amount": amount,
                 "table_state": self._get_table_state_dict(table)
             })
+            
+            # If game auto-started, broadcast game start
+            if was_waiting and table.state == "playing":
+                await self.connection_manager.broadcast_to_table(table_id, {
+                    "type": "game_started",
+                    "message": "Game started! Cards have been dealt.",
+                    "table_state": self._get_table_state_dict(table)
+                })
+                
+                # Send individual player views (hide dealer's hole card)
+                for player in table.players:
+                    player_view = self._get_player_view(table, player.id)
+                    await self.connection_manager.send_to_player(player.id, {
+                        "type": "cards_dealt",
+                        "table_state": player_view
+                    })
         else:
             await self._send_error(websocket, msg)
     
@@ -245,12 +279,83 @@ class GameHandler:
         """Handle game completion"""
         results = game_engine._calculate_results(table)
         
+        # Prepare detailed results for broadcast
+        game_results = []
+        for result in results:
+            player = next((p for p in table.players if p.id == result.player_id), None)
+            if player:
+                game_results.append({
+                    "player_id": result.player_id,
+                    "player_name": player.name,
+                    "hands": result.hands,
+                    "total_winnings": result.winnings,
+                    "total_bet": result.total_bet,
+                    "new_chip_count": player.chips
+                })
+        
         # Send results to all players
         await self.connection_manager.broadcast_to_table(table_id, {
             "type": "game_finished",
-            "results": [result.dict() for result in results],
+            "message": "Game finished! Check your results.",
+            "results": game_results,
+            "dealer_hand": {
+                "cards": [self._get_card_dict(card) for card in table.dealer.hand.cards],
+                "value": table.dealer.hand.value,
+                "is_blackjack": table.dealer.hand.is_blackjack,
+                "is_bust": table.dealer.hand.is_bust
+            },
             "table_state": self._get_table_state_dict(table)
         })
+        
+        # Auto-start new round after 5 seconds
+        await asyncio.sleep(5)
+        
+        # Check if table still exists and has players
+        current_table = game_engine.get_table(table_id)
+        if current_table and len(current_table.players) > 0:
+            success, msg = game_engine.new_round(table_id)
+            if success:
+                await self.connection_manager.broadcast_to_table(table_id, {
+                    "type": "new_round_started",
+                    "message": "New round starting! Place your bets.",
+                    "table_state": self._get_table_state_dict(current_table)
+                })
+    
+    async def _handle_chat_message(self, table_id: str, websocket: WebSocket, message: Dict[str, Any]):
+        """Handle chat message"""
+        player_id = message.get("player_id")
+        player_name = message.get("player_name")
+        chat_message = message.get("message")
+        timestamp = message.get("timestamp")
+        
+        if not player_name or not chat_message:
+            await self._send_error(websocket, "Player name and message are required")
+            return
+        
+        # Broadcast chat message to all players at the table
+        await self.connection_manager.broadcast_to_table(table_id, {
+            "type": "chat_message",
+            "player_id": player_id,
+            "player_name": player_name,
+            "message": chat_message,
+            "timestamp": timestamp or datetime.utcnow().isoformat()
+        })
+    
+    async def _handle_new_round(self, table_id: str, websocket: WebSocket, message: Dict[str, Any]):
+        """Handle starting a new round"""
+        success, msg = game_engine.new_round(table_id)
+        
+        if success:
+            table = game_engine.get_table(table_id)
+            
+            # Broadcast new round to all players
+            await self.connection_manager.broadcast_to_table(table_id, {
+                "type": "new_round_started",
+                "message": msg,
+                "table_state": self._get_table_state_dict(table)
+            })
+        else:
+            await self._send_error(websocket, msg)
     
     def _get_table_state_dict(self, table) -> Dict[str, Any]:
         """Get table state as dictionary"""
@@ -274,12 +379,24 @@ class GameHandler:
         """Get table state from a specific player's perspective"""
         table_dict = self._get_table_state_dict(table)
         
-        # Hide other players' hole cards if game is in progress
-        if table.state in [GameState.PLAYING, GameState.DEALER_TURN]:
-            for i, player_dict in enumerate(table_dict["players"]):
-                if player_dict["id"] != player_id:
-                    # Hide cards for other players (could implement partial hiding)
-                    pass
+        # Hide dealer's hole card if game is in progress and card is marked as hidden
+        if table.state in ["playing"] and table_dict.get("dealer"):
+            dealer_hand = table_dict["dealer"]["hand"]
+            if dealer_hand and dealer_hand.get("cards"):
+                # Create a copy of the cards to avoid modifying the original
+                cards_copy = []
+                for i, card in enumerate(dealer_hand["cards"]):
+                    if card.get("hidden", False):
+                        # Replace hidden card with a placeholder
+                        cards_copy.append({
+                            "suit": "hidden",
+                            "rank": "?",
+                            "value": 0,
+                            "hidden": True
+                        })
+                    else:
+                        cards_copy.append(card)
+                dealer_hand["cards"] = cards_copy
         
         return table_dict
     

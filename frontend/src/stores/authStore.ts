@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import { User, AuthResponse } from '../types/game';
-import apiService from '../services/api';
+import { User, AuthResponse } from '../types';
+import { apiService } from '../services/api';
 
 interface AuthState {
   user: User | null;
@@ -11,12 +11,11 @@ interface AuthState {
   
   // Actions
   login: (username: string, password: string) => Promise<boolean>;
-  register: (username: string, password: string, email?: string) => Promise<boolean>;
+  register: (username: string, email: string, password: string) => Promise<boolean>;
   loginAsGuest: () => Promise<boolean>;
   logout: () => void;
   clearError: () => void;
-  initialize: () => void;
-  updateUser: (user: Partial<User>) => void;
+  initialize: () => Promise<void>;
 }
 
 export const useAuthStore = create<AuthState>()(
@@ -31,61 +30,75 @@ export const useAuthStore = create<AuthState>()(
         set({ isLoading: true, error: null });
         
         try {
-          const response: AuthResponse = await apiService.login(username, password);
+          const response: any = await apiService.login({ username, password });
           
           if (response.success) {
+            // Store token
             apiService.setAuthToken(response.access_token);
+            
             set({
-              user: response.user,
+              user: { ...response.user, is_guest: false },
               isAuthenticated: true,
               isLoading: false,
-              error: null,
+              error: null
             });
+            
             return true;
           } else {
             set({
-              error: response.message || 'Login failed',
               isLoading: false,
+              error: response.message || 'Login failed',
+              isAuthenticated: false,
+              user: null
             });
             return false;
           }
         } catch (error: any) {
           const errorMessage = error.response?.data?.detail || 'Login failed';
           set({
-            error: errorMessage,
             isLoading: false,
+            error: errorMessage,
+            isAuthenticated: false,
+            user: null
           });
           return false;
         }
       },
 
-      register: async (username: string, password: string, email?: string) => {
+      register: async (username: string, email: string, password: string) => {
         set({ isLoading: true, error: null });
         
         try {
-          const response: AuthResponse = await apiService.register(username, password, email);
+          const response: any = await apiService.register({ username, email, password });
           
           if (response.success) {
+            // Store token
             apiService.setAuthToken(response.access_token);
+            
             set({
-              user: response.user,
+              user: { ...response.user, is_guest: false },
               isAuthenticated: true,
               isLoading: false,
-              error: null,
+              error: null
             });
+            
             return true;
           } else {
             set({
-              error: response.message || 'Registration failed',
               isLoading: false,
+              error: response.message || 'Registration failed',
+              isAuthenticated: false,
+              user: null
             });
             return false;
           }
         } catch (error: any) {
           const errorMessage = error.response?.data?.detail || 'Registration failed';
           set({
-            error: errorMessage,
             isLoading: false,
+            error: errorMessage,
+            isAuthenticated: false,
+            user: null
           });
           return false;
         }
@@ -95,29 +108,36 @@ export const useAuthStore = create<AuthState>()(
         set({ isLoading: true, error: null });
         
         try {
-          const response: AuthResponse = await apiService.createGuestUser();
+          const response: any = await apiService.createGuestUser();
           
           if (response.success) {
+            // Store token
             apiService.setAuthToken(response.access_token);
+            
             set({
-              user: response.user,
+              user: { ...response.user, is_guest: true },
               isAuthenticated: true,
               isLoading: false,
-              error: null,
+              error: null
             });
+            
             return true;
           } else {
             set({
-              error: response.message || 'Guest login failed',
               isLoading: false,
+              error: response.message || 'Guest login failed',
+              isAuthenticated: false,
+              user: null
             });
             return false;
           }
         } catch (error: any) {
           const errorMessage = error.response?.data?.detail || 'Guest login failed';
           set({
-            error: errorMessage,
             isLoading: false,
+            error: errorMessage,
+            isAuthenticated: false,
+            user: null
           });
           return false;
         }
@@ -128,7 +148,7 @@ export const useAuthStore = create<AuthState>()(
         set({
           user: null,
           isAuthenticated: false,
-          error: null,
+          error: null
         });
       },
 
@@ -136,45 +156,54 @@ export const useAuthStore = create<AuthState>()(
         set({ error: null });
       },
 
-      initialize: () => {
+      initialize: async () => {
         const token = apiService.getAuthToken();
-        const storedUser = localStorage.getItem('user');
         
-        if (token && storedUser) {
-          try {
-            const user = JSON.parse(storedUser);
-            set({
-              user,
-              isAuthenticated: true,
-            });
-            
-            // Verify token is still valid
-            apiService.getCurrentUser().catch(() => {
-              // Token is invalid, logout
-              get().logout();
-            });
-          } catch (error) {
-            // Invalid stored user data, logout
-            get().logout();
-          }
+        if (!token) {
+          set({ isLoading: false });
+          return;
         }
-      },
 
-      updateUser: (userData: Partial<User>) => {
-        const currentUser = get().user;
-        if (currentUser) {
-          const updatedUser = { ...currentUser, ...userData };
-          set({ user: updatedUser });
-          localStorage.setItem('user', JSON.stringify(updatedUser));
+        set({ isLoading: true });
+        
+        try {
+          const response: any = await apiService.getCurrentUser();
+          
+          if (response.success) {
+            set({
+              user: response.user,
+              isAuthenticated: true,
+              isLoading: false,
+              error: null
+            });
+          } else {
+            // Invalid response, clear token
+            apiService.removeAuthToken();
+            set({
+              user: null,
+              isAuthenticated: false,
+              isLoading: false,
+              error: null
+            });
+          }
+        } catch (error) {
+          // Token is invalid, clear it
+          apiService.removeAuthToken();
+          set({
+            user: null,
+            isAuthenticated: false,
+            isLoading: false,
+            error: null
+          });
         }
-      },
+      }
     }),
     {
       name: 'auth-storage',
       partialize: (state) => ({
         user: state.user,
-        isAuthenticated: state.isAuthenticated,
-      }),
+        isAuthenticated: state.isAuthenticated
+      })
     }
   )
 ); 
