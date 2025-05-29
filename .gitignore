@@ -171,4 +171,23 @@ out/
 
 # SSH keys
 *.key
-*.pub 
+*.pub
+
+# Lambda deployment artifacts
+lambda-deployment/
+*.zip
+
+# Docker build artifacts
+*.tar
+
+# AWS deployment artifacts
+response.json
+test-*.json
+
+# Virtual environments (additional patterns)
+myenv/
+.venv/
+
+# Temporary deployment files
+deploy-temp/
+temp/ 
