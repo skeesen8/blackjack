@@ -1,53 +1,43 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Container,
   Typography,
-  Box,
-  Paper,
-  Button,
-  Chip,
-  Avatar,
   Grid,
   Card,
   CardContent,
-  TextField,
-  IconButton,
-  Slider,
+  Button,
+  Box,
+  Chip,
+  CircularProgress,
   Alert,
   Dialog,
   DialogTitle,
   DialogContent,
   DialogActions,
-  CircularProgress
+  TextField,
+  Paper,
+  List,
+  ListItem,
+  ListItemText,
+  IconButton,
+  Divider,
+  Avatar,
 } from '@mui/material';
 import {
-  Send as SendIcon,
-  ExitToApp as LeaveIcon,
-  Visibility as SpectateIcon,
-  Casino as ChipIcon,
-  PlayArrow as PlayIcon
+  PlayArrow,
+  Stop,
+  Send,
+  ExitToApp,
+  Casino,
 } from '@mui/icons-material';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../stores/authStore';
 import { tableService } from '../services/api';
+import CardComponent from '../components/Card';
+import WinNotification from '../components/WinNotification';
+import { Hand, Card as GameCard, GameState as GameStateEnum } from '../types/game';
 
-// Types for the game
-interface Card {
-  suit: 'hearts' | 'diamonds' | 'clubs' | 'spades' | 'hidden';
-  rank: string;
-  hidden?: boolean;
-}
-
-interface Hand {
-  cards: Card[];
-  value: number;
-  bet: number;
-  isFinished: boolean;
-  isBlackjack: boolean;
-  isBust: boolean;
-}
-
-interface Player {
+interface GamePlayer {
   id: string;
   name: string;
   chips: number;
@@ -60,12 +50,14 @@ interface Player {
 interface GameState {
   id: string;
   tableId: string;
-  status: 'waiting' | 'betting' | 'dealing' | 'playing' | 'finished' | 'dealer_turn';
-  players: Player[];
+  name: string;
+  status: string;
+  players: GamePlayer[];
   dealerHand: Hand;
   currentPlayerId: string | null;
   minBet: number;
   maxBet: number;
+  bet_countdown: number;
 }
 
 const Game = () => {
@@ -77,7 +69,6 @@ const Game = () => {
   const [gameState, setGameState] = useState<GameState | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [isSpectating, setIsSpectating] = useState(false);
   const [gameResults, setGameResults] = useState<any>(null);
   
   // Betting state
@@ -85,321 +76,47 @@ const Game = () => {
   const [showBettingDialog, setShowBettingDialog] = useState(false);
   const [showResultsDialog, setShowResultsDialog] = useState(false);
   
-  // Chat state
+  // Chat state (disabled for now since no WebSocket)
   const [chatMessages, setChatMessages] = useState<Array<{id: string, player: string, message: string, timestamp: Date}>>([]);
   const [chatMessage, setChatMessage] = useState('');
   const chatEndRef = useRef<HTMLDivElement>(null);
   
-  // WebSocket connection
-  const wsRef = useRef<WebSocket | null>(null);
-  const [isConnected, setIsConnected] = useState(false);
-  const [hasJoinedTable, setHasJoinedTable] = useState(false);
+  // Win notification state
+  const [showWinNotification, setShowWinNotification] = useState(false);
+  const [winNotificationType, setWinNotificationType] = useState<'win' | 'blackjack' | 'push' | 'lose'>('win');
+  const [winAmount, setWinAmount] = useState(0);
+  const [winHandValue, setWinHandValue] = useState<number | undefined>(undefined);
+  
+  // Polling for game state updates
+  const [polling, setPolling] = useState(false);
+  const pollingRef = useRef<NodeJS.Timeout | null>(null);
+  const initializingRef = useRef(false);
 
+  // Update bet amount when game state changes to match table minimums
   useEffect(() => {
-    if (!tableId) return;
-    
-    // Initialize game state and WebSocket connection
-    initializeGame();
-    connectWebSocket();
-    
-    return () => {
-      if (wsRef.current) {
-        wsRef.current.close();
-      }
-    };
-  }, [tableId]);
-
-  useEffect(() => {
-    // Auto-scroll chat to bottom
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [chatMessages]);
-
-  const initializeGame = async () => {
-    try {
-      setLoading(true);
-      
-      // First, try to join the table via API
-      if (user) {
-        try {
-          await tableService.joinTable(tableId!);
-        } catch (err) {
-          console.log('Could not join table via API, continuing with WebSocket connection');
-        }
-      }
-      
-      // Mock game state for now - in real implementation, fetch from API
-      const mockGameState: GameState = {
-        id: 'game-1',
-        tableId: tableId!,
-        status: 'waiting',
-        players: [
-          {
-            id: user?.id || 'player-1',
-            name: user?.username || 'You',
-            chips: user?.chips || 1000,
-            hands: [],
-            seatPosition: 1,
-            isActive: true,
-            isCurrentPlayer: false
-          }
-        ],
-        dealerHand: {
-          cards: [],
-          value: 0,
-          bet: 0,
-          isFinished: false,
-          isBlackjack: false,
-          isBust: false
-        },
-        currentPlayerId: null,
-        minBet: 10,
-        maxBet: 500
-      };
-      
-      setGameState(mockGameState);
-      setError(null);
-    } catch (err) {
-      setError('Failed to load game');
-      console.error('Error loading game:', err);
-    } finally {
-      setLoading(false);
+    if (gameState && gameState.minBet > betAmount) {
+      setBetAmount(gameState.minBet);
     }
-  };
-
-  const connectWebSocket = () => {
-    if (!tableId || !user || isConnected) return;
-    
-    const wsUrl = `ws://localhost:8000/ws/${tableId}`;
-    const ws = new WebSocket(wsUrl);
-    
-    ws.onopen = () => {
-      console.log('WebSocket connected');
-      setIsConnected(true);
-      
-      // Only send join message if we haven't joined yet
-      if (!hasJoinedTable) {
-        ws.send(JSON.stringify({
-          type: 'join_table',
-          player_name: user.username,
-          player_id: user.id
-        }));
-      } else {
-        // Just request current table state
-        ws.send(JSON.stringify({
-          type: 'get_table_state',
-          player_id: user.id
-        }));
-      }
-    };
-    
-    ws.onmessage = (event) => {
-      try {
-        const message = JSON.parse(event.data);
-        handleWebSocketMessage(message);
-      } catch (err) {
-        console.error('Error parsing WebSocket message:', err);
-      }
-    };
-    
-    ws.onclose = () => {
-      console.log('WebSocket disconnected');
-      setIsConnected(false);
-      // Reset join status on disconnect so we can rejoin on reconnect
-      setHasJoinedTable(false);
-      // Attempt to reconnect after 3 seconds
-      setTimeout(() => {
-        if (!isConnected) {
-          connectWebSocket();
-        }
-      }, 3000);
-    };
-    
-    ws.onerror = (error) => {
-      console.error('WebSocket error:', error);
-      setIsConnected(false);
-    };
-    
-    wsRef.current = ws;
-  };
-
-  const handleWebSocketMessage = (message: any) => {
-    switch (message.type) {
-      case 'join_table_response':
-        if (message.success) {
-          console.log('Successfully joined table:', message.message);
-          setHasJoinedTable(true);
-        } else {
-          setError('Failed to join table: ' + message.message);
-        }
-        break;
-      case 'game_update':
-      case 'table_state':
-      case 'cards_dealt':
-        const convertedState = convertBackendTableState(message.gameState || message.table_state);
-        setGameState(convertedState);
-        break;
-      case 'chat_message':
-        setChatMessages(prev => [...prev, {
-          id: Date.now().toString(),
-          player: message.playerName || message.player_name,
-          message: message.message,
-          timestamp: new Date(message.timestamp)
-        }]);
-        break;
-      case 'player_joined':
-        console.log('Player joined:', message.player);
-        if (message.table_state) {
-          // Convert backend table state to frontend format
-          const convertedState = convertBackendTableState(message.table_state);
-          setGameState(convertedState);
-        } else if (message.player) {
-          // Add player to current game state
-          setGameState(prev => {
-            if (!prev) return prev;
-            const convertedPlayer = convertBackendPlayer(message.player);
-            const existingPlayerIndex = prev.players.findIndex(p => p.id === convertedPlayer.id);
-            
-            if (existingPlayerIndex >= 0) {
-              // Update existing player
-              const updatedPlayers = [...prev.players];
-              updatedPlayers[existingPlayerIndex] = convertedPlayer;
-              return { ...prev, players: updatedPlayers };
-            } else {
-              // Add new player
-              return { ...prev, players: [...prev.players, convertedPlayer] };
-            }
-          });
-        }
-        break;
-      case 'player_left':
-        console.log('Player left:', message.player_id);
-        if (message.table_state) {
-          const convertedState = convertBackendTableState(message.table_state);
-          setGameState(convertedState);
-        }
-        break;
-      case 'bet_placed':
-        console.log('Bet placed:', message.amount);
-        if (message.table_state) {
-          const convertedState = convertBackendTableState(message.table_state);
-          setGameState(convertedState);
-        }
-        break;
-      case 'game_started':
-        console.log('Game started:', message.message);
-        if (message.table_state) {
-          const convertedState = convertBackendTableState(message.table_state);
-          setGameState(convertedState);
-        }
-        break;
-      case 'player_action_broadcast':
-        console.log('Player action:', message.action);
-        if (message.table_state) {
-          const convertedState = convertBackendTableState(message.table_state);
-          setGameState(convertedState);
-        }
-        break;
-      case 'game_finished':
-        console.log('Game finished:', message.message);
-        if (message.table_state) {
-          const convertedState = convertBackendTableState(message.table_state);
-          setGameState(convertedState);
-        }
-        if (message.results) {
-          setGameResults(message);
-          setShowResultsDialog(true);
-        }
-        break;
-      case 'new_round_started':
-        console.log('New round started:', message.message);
-        if (message.table_state) {
-          const convertedState = convertBackendTableState(message.table_state);
-          setGameState(convertedState);
-        }
-        setGameResults(null);
-        setShowResultsDialog(false);
-        break;
-      case 'error':
-        setError(message.message);
-        break;
-      default:
-        console.log('Unknown message type:', message.type, message);
-    }
-  };
-
-  const sendWebSocketMessage = (message: any) => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify(message));
-    }
-  };
-
-  const handlePlaceBet = () => {
-    if (!gameState || !user) return;
-    
-    sendWebSocketMessage({
-      type: 'place_bet',
-      player_id: user.id,
-      amount: betAmount
-    });
-    
-    setShowBettingDialog(false);
-  };
-
-  const handlePlayerAction = (action: string) => {
-    if (!gameState || !user) return;
-    
-    sendWebSocketMessage({
-      type: 'player_action',
-      player_id: user.id,
-      action: action
-    });
-  };
-
-  const handleSendChat = () => {
-    if (!chatMessage.trim() || !user) return;
-    
-    sendWebSocketMessage({
-      type: 'chat_message',
-      player_id: user.id,
-      player_name: user.username,
-      message: chatMessage,
-      timestamp: new Date().toISOString()
-    });
-    
-    setChatMessage('');
-  };
-
-  const handleLeaveTable = () => {
-    // Send leave message if connected
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && user) {
-      sendWebSocketMessage({
-        type: 'leave_table',
-        player_id: user.id
-      });
-    }
-    
-    // Reset connection state
-    setHasJoinedTable(false);
-    setIsConnected(false);
-    
-    // Close WebSocket connection
-    if (wsRef.current) {
-      wsRef.current.close();
-    }
-    
-    navigate('/tables');
-  };
-
-  const handlePlayAgain = () => {
-    if (!user) return;
-    
-    sendWebSocketMessage({
-      type: 'new_round'
-    });
-  };
+  }, [gameState?.minBet, betAmount]);
 
   // Conversion functions for backend data
-  const convertBackendPlayer = (backendPlayer: any): Player => {
+  const convertBackendHand = useCallback((backendHand: any): Hand => {
+    return {
+      cards: backendHand.cards || [],
+      value: backendHand.value || 0,
+      bet: backendHand.bet || 0,
+      is_split: backendHand.is_split || false,
+      is_doubled: backendHand.is_doubled || false,
+      is_surrendered: backendHand.is_surrendered || false,
+      is_finished: backendHand.is_finished || false,
+      is_blackjack: backendHand.is_blackjack || false,
+      is_bust: backendHand.is_bust || false,
+      can_split: backendHand.can_split || false,
+      can_double: backendHand.can_double || false
+    };
+  }, []);
+
+  const convertBackendPlayer = useCallback((backendPlayer: any): GamePlayer => {
     return {
       id: backendPlayer.id,
       name: backendPlayer.name,
@@ -409,20 +126,9 @@ const Game = () => {
       isActive: backendPlayer.is_active !== false,
       isCurrentPlayer: backendPlayer.is_current_player || false
     };
-  };
+  }, [convertBackendHand]);
 
-  const convertBackendHand = (backendHand: any): Hand => {
-    return {
-      cards: backendHand.cards || [],
-      value: backendHand.value || 0,
-      bet: backendHand.bet || 0,
-      isFinished: backendHand.is_finished || false,
-      isBlackjack: backendHand.is_blackjack || false,
-      isBust: backendHand.is_bust || false
-    };
-  };
-
-  const convertBackendTableState = (backendState: any): GameState => {
+  const convertBackendTableState = useCallback((backendState: any): GameState => {
     const players = backendState.players ? backendState.players.map((player: any, index: number) => ({
       ...convertBackendPlayer(player),
       isCurrentPlayer: index === backendState.current_player_index && backendState.state === 'playing'
@@ -431,184 +137,276 @@ const Game = () => {
     return {
       id: backendState.id || 'game-1',
       tableId: backendState.table_id || tableId!,
-      status: backendState.state || backendState.status || 'waiting',
+      name: backendState.name || '',
+      status: backendState.state || 'waiting',
       players: players,
       dealerHand: backendState.dealer ? convertBackendHand(backendState.dealer.hand || backendState.dealer) : {
         cards: [],
         value: 0,
         bet: 0,
-        isFinished: false,
-        isBlackjack: false,
-        isBust: false
+        is_split: false,
+        is_doubled: false,
+        is_surrendered: false,
+        is_finished: false,
+        is_blackjack: false,
+        is_bust: false,
+        can_split: false,
+        can_double: false
       },
       currentPlayerId: backendState.current_player_id || null,
       minBet: backendState.min_bet || 10,
-      maxBet: backendState.max_bet || 500
+      maxBet: backendState.max_bet || 500,
+      bet_countdown: backendState.bet_countdown || 0
     };
-  };
+  }, [tableId, convertBackendPlayer, convertBackendHand]);
 
-  const renderCard = (card: Card, index: number) => {
-    const suitSymbols = {
-      hearts: '♥',
-      diamonds: '♦',
-      clubs: '♣',
-      spades: '♠'
-    };
+  const checkForWinResults = useCallback((newGameState: GameState) => {
+    if (!user || !newGameState) return;
     
-    const suitColors = {
-      hearts: '#e53e3e',
-      diamonds: '#e53e3e',
-      clubs: '#2d3748',
-      spades: '#2d3748'
+    const currentPlayer = newGameState.players.find(p => p.id === user.id);
+    if (!currentPlayer || !currentPlayer.hands.length) return;
+    
+    const dealerValue = newGameState.dealerHand.value;
+    const dealerBlackjack = newGameState.dealerHand.cards.length === 2 && dealerValue === 21;
+    const dealerBust = dealerValue > 21;
+    
+    // Check each hand for results
+    currentPlayer.hands.forEach((hand, index) => {
+      if (hand.is_surrendered) return; // Skip surrendered hands
+      
+      let winType: 'win' | 'blackjack' | 'push' | 'lose' = 'lose';
+      let winAmount = 0;
+      
+      if (hand.is_bust) {
+        winType = 'lose';
+        winAmount = 0;
+      } else if (hand.is_blackjack && !dealerBlackjack) {
+        winType = 'blackjack';
+        winAmount = hand.bet + Math.floor(hand.bet * 1.5); // 3:2 payout
+      } else if (hand.is_blackjack && dealerBlackjack) {
+        winType = 'push';
+        winAmount = hand.bet; // Return original bet
+      } else if (dealerBust && !hand.is_bust) {
+        winType = 'win';
+        winAmount = hand.bet * 2;
+      } else if (hand.value > dealerValue) {
+        winType = 'win';
+        winAmount = hand.bet * 2;
+      } else if (hand.value === dealerValue) {
+        winType = 'push';
+        winAmount = hand.bet;
+      } else {
+        winType = 'lose';
+        winAmount = 0;
+      }
+      
+      // Show notification for the first hand (or if only one hand)
+      if (index === 0) {
+        console.log('Showing win notification:', winType, 'amount:', winAmount);
+        setWinNotificationType(winType);
+        setWinAmount(winAmount);
+        setWinHandValue(hand.value);
+        setShowWinNotification(true);
+      }
+    });
+  }, [user]);
+
+  // Win notification effect - separate from loadGameState to ensure it runs
+  useEffect(() => {
+    if (!gameState || !user) return;
+    
+    // Only check if game is finished and we have a dealer hand with cards
+    if (gameState.status === 'finished' && gameState.dealerHand.cards.length > 0) {
+      console.log('Game finished, checking for win notifications');
+      checkForWinResults(gameState);
+    }
+  }, [gameState?.status, gameState?.dealerHand.cards.length, user, checkForWinResults]);
+
+  const loadGameState = useCallback(async () => {
+    if (!tableId) return;
+    
+    try {
+      const response = await tableService.getTable(tableId);
+      // The backend returns { success: true, table: ... }
+      const table = (response as any).table || response.data;
+      
+      // Convert backend table format to frontend game state
+      const convertedState = convertBackendTableState(table);
+      
+      // Simply update the state - win notification effect will handle notifications
+      setGameState(convertedState);
+      
+      setError(null);
+    } catch (err) {
+      console.error('Error loading game state:', err);
+      setError('Failed to load game state');
+    }
+  }, [tableId, convertBackendTableState]);
+
+  const initializeGame = useCallback(async () => {
+    if (initializingRef.current) {
+      console.log('Initialization already in progress, skipping...');
+      return;
+    }
+    
+    try {
+      initializingRef.current = true;
+      setLoading(true);
+      setError(null);
+      
+      console.log('Initializing game for table:', tableId, 'user:', user?.id);
+      
+      // First load the current game state to see if we're already in the table
+      await loadGameState();
+      
+      // Only try to join if we're not already in the table
+      if (user) {
+        try {
+          const tableResponse = await tableService.getTable(tableId!);
+          const table = (tableResponse as any).table || tableResponse.data;
+          const existingPlayer = table.players?.find((p: any) => p.id === user.id);
+          
+          if (!existingPlayer) {
+            console.log('Player not found in table, joining...');
+            // Only join if we're not already in the table
+            await tableService.joinTable(tableId!, user.id, user.username);
+            // Reload game state after joining
+            await loadGameState();
+          } else {
+            console.log('Player already in table, skipping join');
+          }
+        } catch (err) {
+          console.error('Error joining table:', err);
+          // Don't fail completely if join fails, maybe we're already in
+        }
+      }
+      
+      // Start polling for updates only after initialization is complete
+      setPolling(true);
+      
+    } catch (err) {
+      setError('Failed to initialize game');
+      console.error('Error initializing game:', err);
+    } finally {
+      setLoading(false);
+      initializingRef.current = false;
+    }
+  }, [tableId, user, loadGameState]);
+
+  // Polling effect
+  useEffect(() => {
+    if (polling && tableId) {
+      pollingRef.current = setInterval(() => {
+        loadGameState();
+      }, 3000); // Increased from 2 to 3 seconds to reduce load
+      
+      return () => {
+        if (pollingRef.current) {
+          clearInterval(pollingRef.current);
+        }
+      };
+    }
+  }, [polling, loadGameState, tableId]);
+
+  useEffect(() => {
+    if (!tableId || !user) return;
+    
+    // Reset polling when changing tables/users
+    setPolling(false);
+    if (pollingRef.current) {
+      clearInterval(pollingRef.current);
+    }
+    
+    // Initialize the game
+    initializeGame();
+    
+    return () => {
+      setPolling(false);
+      if (pollingRef.current) {
+        clearInterval(pollingRef.current);
+      }
+      initializingRef.current = false;
     };
+  }, [tableId, user?.id]); // Only depend on tableId and user.id, not the full initializeGame function
 
-    if (card.hidden || card.suit === 'hidden') {
-      return (
-        <Box
-          key={index}
-          sx={{
-            width: 60,
-            height: 84,
-            backgroundColor: '#1a365d',
-            border: '2px solid #2d3748',
-            borderRadius: 1,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            margin: '0 -15px 0 0',
-            position: 'relative',
-            zIndex: 10 - index,
-            color: 'white',
-            fontSize: '24px',
-            fontWeight: 'bold'
-          }}
-        >
-          ?
-        </Box>
-      );
+  const handlePlaceBet = async () => {
+    if (!gameState || !user) return;
+    
+    try {
+      const response = await tableService.placeBet(tableId!, user.id, betAmount);
+      if (response.success && (response as any).table) {
+        const convertedState = convertBackendTableState((response as any).table);
+        setGameState(convertedState);
+      }
+      setShowBettingDialog(false);
+    } catch (err) {
+      console.error('Error placing bet:', err);
+      setError('Failed to place bet');
     }
-
-    return (
-      <Box
-        key={index}
-        sx={{
-          width: 60,
-          height: 84,
-          backgroundColor: 'white',
-          border: '2px solid #2d3748',
-          borderRadius: 1,
-          display: 'flex',
-          flexDirection: 'column',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          padding: 0.5,
-          margin: '0 -15px 0 0',
-          position: 'relative',
-          zIndex: 10 - index,
-          color: suitColors[card.suit]
-        }}
-      >
-        <Typography variant="caption" sx={{ fontSize: '10px', fontWeight: 'bold' }}>
-          {card.rank}
-        </Typography>
-        <Typography variant="h6" sx={{ fontSize: '16px' }}>
-          {suitSymbols[card.suit]}
-        </Typography>
-        <Typography variant="caption" sx={{ fontSize: '10px', fontWeight: 'bold', transform: 'rotate(180deg)' }}>
-          {card.rank}
-        </Typography>
-      </Box>
-    );
   };
 
-  const renderHand = (hand: Hand | null | undefined, label: string) => {
-    if (!hand) {
-      return (
-        <Box sx={{ textAlign: 'center', mb: 2 }}>
-          <Typography variant="h6" gutterBottom>
-            {label}
-          </Typography>
-          <Typography variant="body2" color="text.secondary">
-            No cards
-          </Typography>
-        </Box>
-      );
+  const handlePlayerAction = async (action: string) => {
+    if (!gameState || !user) return;
+    
+    try {
+      const response = await tableService.playerAction(tableId!, user.id, action);
+      if (response.success && (response as any).table) {
+        const convertedState = convertBackendTableState((response as any).table);
+        setGameState(convertedState);
+      }
+    } catch (err) {
+      console.error('Error performing player action:', err);
+      setError('Failed to perform action');
     }
-
-    return (
-      <Box sx={{ textAlign: 'center', mb: 2 }}>
-        <Typography variant="h6" gutterBottom>
-          {label} {hand.value > 0 && `(${hand.value})`}
-        </Typography>
-        <Box sx={{ display: 'flex', justifyContent: 'center', mb: 1 }}>
-          {hand.cards && hand.cards.map((card, index) => renderCard(card, index))}
-        </Box>
-        {hand.bet > 0 && (
-          <Chip
-            icon={<ChipIcon />}
-            label={`Bet: $${hand.bet}`}
-            color="primary"
-            size="small"
-          />
-        )}
-        {hand.isBlackjack && <Chip label="Blackjack!" color="success" size="small" sx={{ ml: 1 }} />}
-        {hand.isBust && <Chip label="Bust!" color="error" size="small" sx={{ ml: 1 }} />}
-      </Box>
-    );
   };
 
-  const renderPlayerSeat = (player: Player) => (
-    <Card
-      key={player.id}
-      sx={{
-        minHeight: 200,
-        backgroundColor: player.isCurrentPlayer ? 'action.selected' : 'background.paper',
-        border: player.isCurrentPlayer ? '2px solid' : '1px solid',
-        borderColor: player.isCurrentPlayer ? 'primary.main' : 'divider'
-      }}
-    >
-      <CardContent>
-        <Box sx={{ display: 'flex', alignItems: 'center', mb: 2 }}>
-          <Avatar sx={{ mr: 1, bgcolor: 'primary.main' }}>
-            {player.name.charAt(0).toUpperCase()}
-          </Avatar>
-          <Box>
-            <Typography variant="subtitle1">{player.name}</Typography>
-            <Typography variant="body2" color="text.secondary">
-              ${player.chips} chips
-            </Typography>
-          </Box>
-        </Box>
-        
-        {player.hands.map((hand, index) => (
-          <Box key={index}>
-            {renderHand(hand, `Hand ${index + 1}`)}
-          </Box>
-        ))}
-        
-        {player.hands.length === 0 && gameState?.status === 'waiting' && (
-          <Typography variant="body2" color="text.secondary" sx={{ textAlign: 'center', py: 4 }}>
-            Waiting for game to start
-          </Typography>
-        )}
-      </CardContent>
-    </Card>
-  );
+  const handlePlayAgain = async () => {
+    if (!tableId) return;
+    
+    try {
+      const response = await tableService.newRound(tableId);
+      if (response.success && (response as any).table) {
+        const convertedState = convertBackendTableState((response as any).table);
+        setGameState(convertedState);
+        setShowResultsDialog(false);
+        setGameResults(null);
+      }
+    } catch (err) {
+      console.error('Error starting new round:', err);
+      setError('Failed to start new round');
+    }
+  };
+
+  const handleLeaveTable = () => {
+    setPolling(false);
+    navigate('/tables');
+  };
 
   if (loading) {
     return (
-      <Container maxWidth="lg" sx={{ py: 4 }}>
-        <Box display="flex" justifyContent="center" alignItems="center" minHeight="50vh">
-          <CircularProgress size={60} />
-        </Box>
+      <Container maxWidth="lg" sx={{ mt: 4, display: 'flex', justifyContent: 'center' }}>
+        <CircularProgress />
+      </Container>
+    );
+  }
+
+  if (error) {
+    return (
+      <Container maxWidth="lg" sx={{ mt: 4 }}>
+        <Alert severity="error" sx={{ mb: 2 }}>
+          {error}
+        </Alert>
+        <Button onClick={() => navigate('/tables')} variant="contained">
+          Back to Tables
+        </Button>
       </Container>
     );
   }
 
   if (!gameState) {
     return (
-      <Container maxWidth="lg" sx={{ py: 4 }}>
-        <Alert severity="error">Failed to load game</Alert>
+      <Container maxWidth="lg" sx={{ mt: 4 }}>
+        <Alert severity="info">No game data available</Alert>
       </Container>
     );
   }
@@ -617,275 +415,293 @@ const Game = () => {
   const isCurrentPlayerTurn = currentPlayer?.isCurrentPlayer;
 
   return (
-    <Container maxWidth="xl" sx={{ py: 2 }}>
+    <Container maxWidth="lg" sx={{ mt: 2 }}>
+      {/* Header */}
+      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
+        <Typography variant="h4" component="h1">
+          Blackjack Table
+        </Typography>
+        <Box sx={{ display: 'flex', gap: 2, alignItems: 'center' }}>
+          {gameState.bet_countdown > 0 && (
+            <Chip 
+              label={`Betting ends in: ${gameState.bet_countdown}s`} 
+              color="warning"
+              sx={{ 
+                fontSize: '1rem',
+                fontWeight: 'bold',
+                animation: 'pulse 1s infinite',
+                '@keyframes pulse': {
+                  '0%': { opacity: 1 },
+                  '50%': { opacity: 0.7 },
+                  '100%': { opacity: 1 }
+                }
+              }}
+            />
+          )}
+          <Chip 
+            label={`Status: ${gameState.status}`} 
+            color={gameState.status === 'playing' ? 'success' : gameState.status === 'finished' ? 'error' : 'default'} 
+          />
+          <Button
+            variant="outlined"
+            startIcon={<ExitToApp />}
+            onClick={handleLeaveTable}
+          >
+            Leave Table
+          </Button>
+        </Box>
+      </Box>
+
       {error && (
-        <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError(null)}>
+        <Alert severity="error" sx={{ mb: 2 }}>
           {error}
         </Alert>
       )}
 
-      {/* Header */}
-      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
-        <Box>
-          <Typography variant="h4">Blackjack Table</Typography>
-          {gameState.status === 'playing' && (
-            <Typography variant="h6" color="primary">
-              {isCurrentPlayerTurn ? "Your turn!" : `Waiting for ${gameState.players.find(p => p.isCurrentPlayer)?.name || 'player'}'s turn`}
-            </Typography>
-          )}
-        </Box>
-        <Box>
-          <Button
-            variant="outlined"
-            startIcon={<LeaveIcon />}
-            onClick={handleLeaveTable}
-            sx={{ mr: 1 }}
-          >
-            Leave Table
-          </Button>
-          {!isSpectating && gameState.status === 'waiting' && (
-            <Button
-              variant="contained"
-              startIcon={<PlayIcon />}
-              onClick={() => setShowBettingDialog(true)}
-              disabled={currentPlayer?.hands && currentPlayer.hands.length > 0 && currentPlayer.hands[0].bet > 0}
-            >
-              {currentPlayer?.hands && currentPlayer.hands.length > 0 && currentPlayer.hands[0].bet > 0 ? 'Bet Placed' : 'Place Bet'}
-            </Button>
-          )}
-          {gameState.status === 'finished' && (
-            <Button
-              variant="contained"
-              color="success"
-              startIcon={<PlayIcon />}
-              onClick={handlePlayAgain}
-            >
-              Play Again
-            </Button>
-          )}
-        </Box>
-      </Box>
-
       <Grid container spacing={3}>
         {/* Game Area */}
         <Grid item xs={12} md={8}>
-          <Paper sx={{ p: 3, minHeight: 600 }}>
-            {/* Dealer Area */}
-            <Box sx={{ textAlign: 'center', mb: 4, p: 2, backgroundColor: 'action.hover', borderRadius: 1 }}>
-              {renderHand(gameState.dealerHand, 'Dealer')}
-            </Box>
-
-            {/* Player Seats */}
-            <Grid container spacing={2}>
-              {Array.from({ length: 6 }, (_, index) => {
-                const player = gameState.players.find(p => p.seatPosition === index + 1);
-                return (
-                  <Grid item xs={6} md={4} key={index}>
-                    {player ? (
-                      renderPlayerSeat(player)
-                    ) : (
-                      <Card sx={{ minHeight: 200, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                        <Typography variant="body2" color="text.secondary">
-                          Empty Seat {index + 1}
-                        </Typography>
-                      </Card>
-                    )}
-                  </Grid>
-                );
-              })}
-            </Grid>
-
-            {/* Player Actions */}
-            {isCurrentPlayerTurn && gameState.status === 'playing' && (
-              <Box sx={{ display: 'flex', justifyContent: 'center', gap: 2, mt: 3 }}>
-                <Button variant="contained" onClick={() => handlePlayerAction('hit')}>
-                  Hit
-                </Button>
-                <Button variant="contained" onClick={() => handlePlayerAction('stand')}>
-                  Stand
-                </Button>
-                {currentPlayer?.hands && currentPlayer.hands[0] && currentPlayer.hands[0].cards.length === 2 && (
-                  <>
-                    <Button variant="outlined" onClick={() => handlePlayerAction('double')}>
-                      Double
-                    </Button>
-                    {currentPlayer.hands[0].cards[0].rank === currentPlayer.hands[0].cards[1].rank && (
-                      <Button variant="outlined" onClick={() => handlePlayerAction('split')}>
-                        Split
-                      </Button>
-                    )}
-                    <Button variant="outlined" color="error" onClick={() => handlePlayerAction('surrender')}>
-                      Surrender
-                    </Button>
-                  </>
+          {/* Dealer Section */}
+          <Card sx={{ mb: 3 }}>
+            <CardContent>
+              <Typography variant="h6" gutterBottom>
+                Dealer {gameState.dealerHand.value > 0 && `(${gameState.dealerHand.value})`}
+              </Typography>
+              <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', minHeight: 120 }}>
+                {gameState.dealerHand.cards.map((card: GameCard, index: number) => (
+                  <CardComponent key={index} card={card} />
+                ))}
+                {gameState.dealerHand.cards.length === 0 && (
+                  <Typography variant="body2" color="textSecondary">
+                    No cards dealt
+                  </Typography>
                 )}
               </Box>
-            )}
+            </CardContent>
+          </Card>
 
-            {/* Game Status */}
-            <Box sx={{ textAlign: 'center', mt: 2 }}>
-              <Chip
-                label={`Game Status: ${gameState.status.toUpperCase()}`}
-                color={gameState.status === 'playing' ? 'success' : 
-                       gameState.status === 'finished' ? 'error' : 'default'}
-              />
-              {gameState.status === 'playing' && !isCurrentPlayerTurn && (
-                <Typography variant="body2" sx={{ mt: 1 }}>
-                  Waiting for {gameState.players.find(p => p.isCurrentPlayer)?.name || 'other player'}...
-                </Typography>
-              )}
-              {gameState.status === 'dealer_turn' && (
-                <Typography variant="body2" sx={{ mt: 1 }}>
-                  Dealer is playing...
-                </Typography>
-              )}
-              {gameState.status === 'finished' && (
-                <Typography variant="body2" sx={{ mt: 1 }}>
-                  Game finished! New round starting soon...
-                </Typography>
-              )}
-            </Box>
-          </Paper>
-        </Grid>
+          {/* Players Section */}
+          <Grid container spacing={2}>
+            {gameState.players.map((player) => (
+              <Grid item xs={12} sm={6} key={player.id}>
+                <Card sx={{ 
+                  border: player.isCurrentPlayer ? '2px solid' : '1px solid',
+                  borderColor: player.isCurrentPlayer ? 'primary.main' : 'divider',
+                  bgcolor: player.id === user?.id ? 'action.hover' : 'background.paper'
+                }}>
+                  <CardContent>
+                    <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+                      <Typography variant="h6">
+                        {player.name} {player.id === user?.id && '(You)'}
+                      </Typography>
+                      <Chip 
+                        label={`${player.chips} chips`} 
+                        color="primary" 
+                        size="small" 
+                      />
+                    </Box>
+                    
+                    {player.hands.map((hand, handIndex) => (
+                      <Box key={handIndex} sx={{ mb: 2 }}>
+                        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 1 }}>
+                          <Typography variant="subtitle2">
+                            Hand {handIndex + 1} 
+                            {hand.value > 0 && ` (${hand.value})`}
+                            {hand.bet > 0 && ` - Bet: ${hand.bet}`}
+                          </Typography>
+                          <Box>
+                            {hand.is_blackjack && <Chip label="Blackjack!" color="success" size="small" />}
+                            {hand.is_bust && <Chip label="Bust" color="error" size="small" />}
+                            {hand.is_doubled && <Chip label="Doubled" color="info" size="small" />}
+                            {hand.is_split && <Chip label="Split" color="warning" size="small" />}
+                          </Box>
+                        </Box>
+                        <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap', minHeight: 80 }}>
+                          {hand.cards.map((card: GameCard, cardIndex: number) => (
+                            <CardComponent key={cardIndex} card={card} />
+                          ))}
+                          {hand.cards.length === 0 && (
+                            <Typography variant="body2" color="textSecondary">
+                              No cards
+                            </Typography>
+                          )}
+                        </Box>
+                      </Box>
+                    ))}
+                  </CardContent>
+                </Card>
+              </Grid>
+            ))}
+          </Grid>
 
-        {/* Chat Area */}
-        <Grid item xs={12} md={4}>
-          <Paper sx={{ p: 2, height: 600, display: 'flex', flexDirection: 'column' }}>
-            <Typography variant="h6" gutterBottom>
-              Table Chat
-            </Typography>
-            
-            {/* Chat Messages */}
-            <Box sx={{ flexGrow: 1, overflowY: 'auto', mb: 2, p: 1, backgroundColor: 'action.hover', borderRadius: 1 }}>
-              {chatMessages.map((msg) => (
-                <Box key={msg.id} sx={{ mb: 1 }}>
-                  <Typography variant="caption" color="text.secondary">
-                    {msg.player}: 
-                  </Typography>
-                  <Typography variant="body2" component="span" sx={{ ml: 1 }}>
-                    {msg.message}
+          {/* Game Actions */}
+          <Card sx={{ mt: 3 }}>
+            <CardContent>
+              <Typography variant="h6" gutterBottom>
+                Game Actions
+              </Typography>
+              
+              {/* Betting */}
+              {gameState.status === 'waiting' && currentPlayer && currentPlayer.hands.length === 0 && (
+                <Box sx={{ display: 'flex', gap: 2, alignItems: 'center' }}>
+                  <Button
+                    variant="contained"
+                    onClick={() => setShowBettingDialog(true)}
+                    startIcon={<Casino />}
+                  >
+                    Place Bet
+                  </Button>
+                  <Typography variant="body2" color="textSecondary">
+                    Min bet: {gameState.minBet}, Max bet: {gameState.maxBet}
                   </Typography>
                 </Box>
-              ))}
-              <Box ref={chatEndRef} />
-            </Box>
-            
-            {/* Chat Input */}
-            <Box sx={{ display: 'flex', gap: 1 }}>
-              <TextField
-                fullWidth
-                size="small"
-                placeholder="Type a message..."
-                value={chatMessage}
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) => setChatMessage(e.target.value)}
-                onKeyPress={(e: React.KeyboardEvent) => e.key === 'Enter' && handleSendChat()}
-              />
-              <IconButton onClick={handleSendChat} color="primary">
-                <SendIcon />
-              </IconButton>
-            </Box>
-          </Paper>
+              )}
+
+              {/* Player Actions */}
+              {isCurrentPlayerTurn && gameState.status === 'playing' && (
+                <Box sx={{ display: 'flex', justifyContent: 'center', gap: 2, mt: 3 }}>
+                  <Button variant="contained" onClick={() => handlePlayerAction('hit')}>
+                    Hit
+                  </Button>
+                  <Button variant="contained" onClick={() => handlePlayerAction('stand')}>
+                    Stand
+                  </Button>
+                  {currentPlayer?.hands && currentPlayer.hands[0] && currentPlayer.hands[0].cards.length === 2 && (
+                    <>
+                      <Button variant="outlined" onClick={() => handlePlayerAction('double')}>
+                        Double
+                      </Button>
+                      {currentPlayer.hands[0].cards[0].rank === currentPlayer.hands[0].cards[1].rank && (
+                        <Button variant="outlined" onClick={() => handlePlayerAction('split')}>
+                          Split
+                        </Button>
+                      )}
+                      <Button variant="outlined" color="error" onClick={() => handlePlayerAction('surrender')}>
+                        Surrender
+                      </Button>
+                    </>
+                  )}
+                </Box>
+              )}
+
+              {/* Game Finished */}
+              {gameState.status === 'finished' && (
+                <Box sx={{ display: 'flex', justifyContent: 'center', gap: 2 }}>
+                  <Button
+                    variant="contained"
+                    onClick={handlePlayAgain}
+                    startIcon={<PlayArrow />}
+                  >
+                    Play Again
+                  </Button>
+                </Box>
+              )}
+
+              {/* Game Status */}
+              <Box sx={{ mt: 2 }}>
+                <Typography variant="body2" color="textSecondary">
+                  {gameState.status === 'waiting' && 'Waiting for players to place bets...'}
+                  {gameState.status === 'playing' && isCurrentPlayerTurn && "It's your turn!"}
+                  {gameState.status === 'playing' && !isCurrentPlayerTurn && 'Waiting for other players...'}
+                  {gameState.status === 'finished' && 'Round finished!'}
+                </Typography>
+              </Box>
+            </CardContent>
+          </Card>
+        </Grid>
+
+        {/* Sidebar */}
+        <Grid item xs={12} md={4}>
+          {/* Player Info */}
+          <Card sx={{ mb: 3 }}>
+            <CardContent>
+              <Typography variant="h6" gutterBottom>
+                Your Info
+              </Typography>
+              <Box sx={{ display: 'flex', justify: 'space-between', mb: 1 }}>
+                <Typography variant="body2">Chips:</Typography>
+                <Typography variant="body2" fontWeight="bold">
+                  {currentPlayer?.chips || 0}
+                </Typography>
+              </Box>
+              <Box sx={{ display: 'flex', justify: 'space-between' }}>
+                <Typography variant="body2">Total Bet:</Typography>
+                <Typography variant="body2" fontWeight="bold">
+                  {currentPlayer?.hands.reduce((total, hand) => total + hand.bet, 0) || 0}
+                </Typography>
+              </Box>
+            </CardContent>
+          </Card>
+
+          {/* Chat - Disabled */}
+          <Card>
+            <CardContent>
+              <Typography variant="h6" gutterBottom>
+                Chat (Coming Soon)
+              </Typography>
+              <Typography variant="body2" color="textSecondary">
+                Chat functionality will be available in the next update.
+              </Typography>
+            </CardContent>
+          </Card>
         </Grid>
       </Grid>
 
       {/* Betting Dialog */}
       <Dialog open={showBettingDialog} onClose={() => setShowBettingDialog(false)}>
-        <DialogTitle>Place Your Bet</DialogTitle>
+        <DialogTitle>Place Your Bet - {gameState.name}</DialogTitle>
         <DialogContent>
-          <Box sx={{ pt: 2, minWidth: 300 }}>
-            <Typography gutterBottom>
-              Bet Amount: ${betAmount}
+          <Box sx={{ mb: 2 }}>
+            <Typography variant="body2" color="textSecondary">
+              Table limits: ${gameState.minBet} - ${gameState.maxBet}
             </Typography>
-            <Slider
-              value={betAmount}
-              onChange={(_: Event, value: number | number[]) => setBetAmount(value as number)}
-              min={gameState.minBet}
-              max={Math.min(gameState.maxBet, currentPlayer?.chips || 0)}
-              step={5}
-              marks={[
-                { value: gameState.minBet, label: `$${gameState.minBet}` },
-                { value: gameState.maxBet, label: `$${gameState.maxBet}` }
-              ]}
-              valueLabelDisplay="auto"
-            />
-            <Typography variant="body2" color="text.secondary" sx={{ mt: 2 }}>
-              Available chips: ${currentPlayer?.chips || 0}
+            <Typography variant="body2" color="textSecondary">
+              Your chips: ${currentPlayer?.chips || 0}
             </Typography>
           </Box>
+          <TextField
+            autoFocus
+            margin="dense"
+            label="Bet Amount"
+            type="number"
+            fullWidth
+            variant="outlined"
+            value={betAmount}
+            onChange={(e) => setBetAmount(Number(e.target.value))}
+            inputProps={{
+              min: gameState.minBet,
+              max: Math.min(gameState.maxBet, currentPlayer?.chips || 0)
+            }}
+            helperText={
+              betAmount < gameState.minBet 
+                ? `Minimum bet is $${gameState.minBet}` 
+                : betAmount > Math.min(gameState.maxBet, currentPlayer?.chips || 0)
+                ? `Maximum bet is $${Math.min(gameState.maxBet, currentPlayer?.chips || 0)}`
+                : `Valid bet range: $${gameState.minBet} - $${Math.min(gameState.maxBet, currentPlayer?.chips || 0)}`
+            }
+            error={betAmount < gameState.minBet || betAmount > Math.min(gameState.maxBet, currentPlayer?.chips || 0)}
+          />
         </DialogContent>
         <DialogActions>
           <Button onClick={() => setShowBettingDialog(false)}>Cancel</Button>
-          <Button onClick={handlePlaceBet} variant="contained">Place Bet</Button>
-        </DialogActions>
-      </Dialog>
-
-      {/* Game Results Dialog */}
-      <Dialog open={showResultsDialog} onClose={() => setShowResultsDialog(false)} maxWidth="md" fullWidth>
-        <DialogTitle>Game Results</DialogTitle>
-        <DialogContent>
-          {gameResults && (
-            <Box sx={{ pt: 2 }}>
-              {/* Dealer's Final Hand */}
-              <Box sx={{ mb: 3, p: 2, backgroundColor: 'action.hover', borderRadius: 1 }}>
-                <Typography variant="h6" gutterBottom>
-                  Dealer's Hand (Value: {gameResults.dealer_hand?.value})
-                </Typography>
-                <Box sx={{ display: 'flex', gap: 1, mb: 1 }}>
-                  {gameResults.dealer_hand?.cards?.map((card: any, index: number) => (
-                    <Box key={index} sx={{ 
-                      width: 40, height: 56, backgroundColor: 'white', 
-                      border: '1px solid #ccc', borderRadius: 1,
-                      display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      fontSize: '12px', color: card.suit === 'hearts' || card.suit === 'diamonds' ? 'red' : 'black'
-                    }}>
-                      {card.rank}
-                    </Box>
-                  ))}
-                </Box>
-                {gameResults.dealer_hand?.is_blackjack && <Chip label="Blackjack!" color="warning" size="small" />}
-                {gameResults.dealer_hand?.is_bust && <Chip label="Bust!" color="error" size="small" />}
-              </Box>
-
-              {/* Player Results */}
-              {gameResults.results?.map((result: any) => (
-                <Box key={result.player_id} sx={{ mb: 2, p: 2, border: '1px solid', borderColor: 'divider', borderRadius: 1 }}>
-                  <Typography variant="h6" gutterBottom>
-                    {result.player_name} - New Balance: ${result.new_chip_count}
-                  </Typography>
-                  {result.hands?.map((hand: any, handIndex: number) => (
-                    <Box key={handIndex} sx={{ mb: 1 }}>
-                      <Typography variant="body2">
-                        Hand {handIndex + 1}: Value {hand.value} | Bet: ${hand.bet} | 
-                        <Chip 
-                          label={hand.result.toUpperCase()} 
-                          color={hand.result === 'win' || hand.result === 'blackjack' ? 'success' : 
-                                 hand.result === 'push' ? 'default' : 'error'} 
-                          size="small" 
-                          sx={{ ml: 1 }}
-                        />
-                      </Typography>
-                      {hand.winnings > 0 && (
-                        <Typography variant="body2" color="success.main">
-                          Winnings: ${hand.winnings}
-                        </Typography>
-                      )}
-                    </Box>
-                  ))}
-                  <Typography variant="body1" sx={{ fontWeight: 'bold' }}>
-                    Total Result: {result.total_winnings > result.total_bet ? '+' : ''}${result.total_winnings - result.total_bet}
-                  </Typography>
-                </Box>
-              ))}
-            </Box>
-          )}
-        </DialogContent>
-        <DialogActions>
-          <Button onClick={() => setShowResultsDialog(false)}>Close</Button>
-          <Button onClick={handlePlayAgain} variant="contained" color="primary">
-            Play Again
+          <Button 
+            onClick={handlePlaceBet} 
+            variant="contained"
+            disabled={betAmount < gameState.minBet || betAmount > Math.min(gameState.maxBet, currentPlayer?.chips || 0)}
+          >
+            Place Bet
           </Button>
         </DialogActions>
       </Dialog>
+
+      {/* Win Notification */}
+      <WinNotification
+        show={showWinNotification}
+        winType={winNotificationType}
+        amount={winAmount}
+        handValue={winHandValue}
+        onClose={() => setShowWinNotification(false)}
+      />
     </Container>
   );
 };

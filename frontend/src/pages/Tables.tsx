@@ -8,10 +8,13 @@ import {
   Button,
   Box,
   Chip,
-  Avatar,
-  AvatarGroup,
   CircularProgress,
-  Alert
+  Alert,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
+  TextField,
 } from '@mui/material';
 import {
   TableRestaurant,
@@ -22,11 +25,13 @@ import {
   Visibility
 } from '@mui/icons-material';
 import { useNavigate } from 'react-router-dom';
+import { useAuthStore } from '../stores/authStore';
+import { tableService, apiService } from '../services/api';
 import { Table } from '../types/index';
-import { tableService } from '../services/api';
 
 const Tables = () => {
   const navigate = useNavigate();
+  const { user } = useAuthStore();
   const [tables, setTables] = useState<Table[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -52,7 +57,11 @@ const Tables = () => {
 
   const handleJoinTable = async (tableId: string) => {
     try {
-      await tableService.joinTable(tableId);
+      if (!user) {
+        setError('You must be logged in to join a table');
+        return;
+      }
+      await tableService.joinTable(tableId, user.id, user.username);
       navigate(`/game/${tableId}`);
     } catch (err) {
       setError('Failed to join table');
@@ -76,6 +85,17 @@ const Tables = () => {
     } catch (err) {
       setError('Failed to create table');
       console.error('Error creating table:', err);
+    }
+  };
+
+  const handleClearTables = async () => {
+    try {
+      await apiService.clearAllTables();
+      await loadTables(); // Reload tables after clearing
+      setError(null);
+    } catch (err) {
+      setError('Failed to clear tables');
+      console.error('Error clearing tables:', err);
     }
   };
 
@@ -123,15 +143,25 @@ const Tables = () => {
             Choose a table to join or create your own
           </Typography>
         </Box>
-        <Button
-          variant="contained"
-          startIcon={<Add />}
-          onClick={handleCreateTable}
-          size="large"
-          sx={{ px: 3 }}
-        >
-          Create Table
-        </Button>
+        <Box sx={{ display: 'flex', gap: 2 }}>
+          <Button
+            variant="outlined"
+            onClick={handleClearTables}
+            size="large"
+            color="warning"
+          >
+            Clear All Tables
+          </Button>
+          <Button
+            variant="contained"
+            startIcon={<Add />}
+            onClick={handleCreateTable}
+            size="large"
+            sx={{ px: 3 }}
+          >
+            Create Table
+          </Button>
+        </Box>
       </Box>
 
       {error && (
